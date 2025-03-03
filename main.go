@@ -19,7 +19,7 @@ func execCmd(cmd *exec.Cmd) error {
 	log.Println("exec", cmd.Path, cmd.Args)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("exec '%s %s' faield. output: %s", cmd.Path, strings.Join(cmd.Args, " "), out)
+		return fmt.Errorf("exec '%s' faield. output: %s", strings.Join(cmd.Args, " "), out)
 	}
 	return nil
 }
