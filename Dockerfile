@@ -1,7 +1,7 @@
 FROM golang as builder
 COPY . /src
 WORKDIR /src
-RUN go build -o server
+RUN CGO_ENABLED=0 go build -o server
 
 FROM debian
 COPY --from=builder /etc/ssl/certs /etc/ssl/certs
