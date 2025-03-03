@@ -59,8 +59,8 @@ func main() {
 		owner := ctx.Param("owner")
 		repo := ctx.Param("repo")
 		url := fmt.Sprintf("https://%s/%s/%s", remote, owner, repo)
-		localRepo := fmt.Sprintf("store/%s/%s/%s", remote, owner, repo)
-		tempRepo := fmt.Sprintf("store/%s/%s/%s.tmp", remote, owner, repo)
+		localRepo := fmt.Sprintf("%s/%s/%s/%s", StorePath, remote, owner, repo)
+		tempRepo := fmt.Sprintf("%s/%s/%s/%s.tmp", StorePath, remote, owner, repo)
 		referenceRepo := localRepo
 
 		existsLocalRepo := false
@@ -108,7 +108,7 @@ func main() {
 	m.NoRoute(func(ctx *gin.Context) {
 		http.FileServer(http.Dir(StorePath)).ServeHTTP(ctx.Writer, ctx.Request)
 	})
-	err := m.Run(":8080")
+	err := m.Run(ListenAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
