@@ -40,6 +40,20 @@ func findSameName(name string) (string, error) {
 			if err == nil {
 				return repoPath, nil
 			}
+			if strings.HasSuffix(name, ".git") {
+				name := strings.Replace(name, ".git", "", -1)
+				repoPath := path.Join(StorePath, remoteList[i].Name(), ownerList[j].Name(), name)
+				_, err := os.Stat(repoPath)
+				if err == nil {
+					return repoPath, nil
+				}
+			} else {
+				repoPath := path.Join(StorePath, remoteList[i].Name(), ownerList[j].Name(), name+".git")
+				_, err := os.Stat(repoPath)
+				if err == nil {
+					return repoPath, nil
+				}
+			}
 		}
 	}
 	return "", os.ErrNotExist
