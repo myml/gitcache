@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
@@ -59,6 +60,49 @@ func findSameName(name string) (string, error) {
 	return "", os.ErrNotExist
 }
 
+func clone(remote, owner, repo string) error {
+	url := fmt.Sprintf("https://%s/%s/%s", remote, owner, repo)
+	localRepo := fmt.Sprintf("%s/%s/%s/%s", StorePath, remote, owner, repo)
+	tempRepo := fmt.Sprintf("%s/%s/%s/%s.tmp", StorePath, remote, owner, repo)
+	referenceRepo := localRepo
+	existsLocalRepo := false
+	_, err := os.Stat(localRepo)
+	if err == nil {
+		existsLocalRepo = true
+	} else {
+		sameNameRepo, err := findSameName(repo)
+		if err == nil {
+			referenceRepo = sameNameRepo
+		}
+	}
+	err = os.RemoveAll(tempRepo)
+	if err != nil {
+		return fmt.Errorf("Failed to remove temporary repository directory: %w", err)
+	}
+	args := []string{"clone", "--bare", "--dissociate", "--reference-if-able", referenceRepo, url, tempRepo}
+	err = execCmd(exec.Command("git", args...))
+	if err != nil {
+		return fmt.Errorf("Failed to clone repository: %w", err)
+	}
+	cmd := exec.Command("git", "update-server-info")
+	cmd.Dir = tempRepo
+	err = execCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("Failed to update server info: %w", err)
+	}
+	if existsLocalRepo {
+		err = os.RemoveAll(localRepo)
+		if err != nil {
+			return fmt.Errorf("Failed to remove local repository directory: %w", err)
+		}
+	}
+	err = os.Rename(tempRepo, localRepo)
+	if err != nil {
+		return fmt.Errorf("Failed to rename temporary repository directory: %w", err)
+	}
+	return nil
+}
+
 func main() {
 	if path := os.Getenv("STORE_PATH"); len(path) > 0 {
 		StorePath = path
@@ -66,60 +110,18 @@ func main() {
 	if addr := os.Getenv("LISTEN_ADDR"); len(addr) > 0 {
 		ListenAddr = addr
 	}
-
+	var lock sync.Mutex
 	m := gin.Default()
-	m.GET(":remote/:owner/:repo/info/refs", func(ctx *gin.Context) {
-		remote := ctx.Param("remote")
-		owner := ctx.Param("owner")
-		repo := ctx.Param("repo")
-		url := fmt.Sprintf("https://%s/%s/%s", remote, owner, repo)
-		localRepo := fmt.Sprintf("%s/%s/%s/%s", StorePath, remote, owner, repo)
-		tempRepo := fmt.Sprintf("%s/%s/%s/%s.tmp", StorePath, remote, owner, repo)
-		referenceRepo := localRepo
-
-		existsLocalRepo := false
-		_, err := os.Stat(localRepo)
-		if err == nil {
-			existsLocalRepo = true
-		} else {
-			sameNameRepo, err := findSameName(repo)
-			if err == nil {
-				referenceRepo = sameNameRepo
-			}
-		}
-		err = os.RemoveAll(tempRepo)
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusServiceUnavailable, err)
-			return
-		}
-		args := []string{"clone", "--bare", "--dissociate", "--reference-if-able", referenceRepo, url, tempRepo}
-		err = execCmd(exec.Command("git", args...))
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusServiceUnavailable, err)
-			return
-		}
-		cmd := exec.Command("git", "update-server-info")
-		cmd.Dir = tempRepo
-		err = execCmd(cmd)
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusServiceUnavailable, err)
-			return
-		}
-		if existsLocalRepo {
-			err = os.RemoveAll(localRepo)
+	m.GET(":remote/:owner/:repo/*file", func(ctx *gin.Context) {
+		if ctx.Param("file") == "/info/refs" {
+			lock.Lock()
+			defer lock.Unlock()
+			err := clone(ctx.Param("remote"), ctx.Param("owner"), ctx.Param("repo"))
 			if err != nil {
-				_ = ctx.AbortWithError(http.StatusServiceUnavailable, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 		}
-		err = os.Rename(tempRepo, localRepo)
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusServiceUnavailable, err)
-			return
-		}
-		http.FileServer(http.Dir(StorePath)).ServeHTTP(ctx.Writer, ctx.Request)
-	})
-	m.NoRoute(func(ctx *gin.Context) {
 		http.FileServer(http.Dir(StorePath)).ServeHTTP(ctx.Writer, ctx.Request)
 	})
 	err := m.Run(ListenAddr)
