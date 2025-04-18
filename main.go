@@ -118,6 +118,7 @@ func main() {
 			defer lock.Unlock()
 			err := clone(ctx.Param("remote"), ctx.Param("owner"), ctx.Param("repo"))
 			if err != nil {
+				log.Println("Error cloning repository: ", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
