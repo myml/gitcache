@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -60,18 +61,37 @@ func findSameName(name string) (string, error) {
 	return "", os.ErrNotExist
 }
 
+func copySymlink(src, dest string) error {
+	files, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("read dir(%s): %w", src, err)
+	}
+	for i := range files {
+		log.Println(files[i])
+		fname := files[i].Name()
+		err = os.Link(filepath.Join(src, fname), filepath.Join(dest, fname))
+		if err != nil {
+			return fmt.Errorf("create symlink(%s): %w", dest, err)
+		}
+	}
+	return nil
+}
+
 func clone(remote, owner, repo string) error {
 	url := fmt.Sprintf("https://%s/%s/%s", remote, owner, repo)
 	localRepo := fmt.Sprintf("%s/%s/%s/%s", StorePath, remote, owner, repo)
 	tempRepo := fmt.Sprintf("%s/%s/%s/%s.tmp", StorePath, remote, owner, repo)
 	referenceRepo := localRepo
 	existsLocalRepo := false
+	existsRefRepo := false
 	_, err := os.Stat(localRepo)
 	if err == nil {
+		existsRefRepo = true
 		existsLocalRepo = true
 	} else {
 		sameNameRepo, err := findSameName(repo)
 		if err == nil {
+			existsRefRepo = true
 			referenceRepo = sameNameRepo
 		}
 	}
@@ -79,10 +99,19 @@ func clone(remote, owner, repo string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to remove temporary repository directory: %w", err)
 	}
-	args := []string{"clone", "--bare", "--dissociate", "--reference-if-able", referenceRepo, url, tempRepo}
+	args := []string{"clone", "--bare", "--reference-if-able", referenceRepo, url, tempRepo}
 	err = execCmd(exec.Command("git", args...))
 	if err != nil {
 		return fmt.Errorf("Failed to clone repository: %w", err)
+	}
+	if existsRefRepo {
+		err = copySymlink(
+			filepath.Join(referenceRepo, "objects/pack"),
+			filepath.Join(tempRepo, "objects/pack"),
+		)
+		if err != nil {
+			return err
+		}
 	}
 	cmd := exec.Command("git", "update-server-info")
 	cmd.Dir = tempRepo
@@ -94,6 +123,14 @@ func clone(remote, owner, repo string) error {
 		err = os.RemoveAll(localRepo)
 		if err != nil {
 			return fmt.Errorf("Failed to remove local repository directory: %w", err)
+		}
+	}
+	if existsRefRepo {
+		err = os.Remove(filepath.Join(tempRepo, "objects/info/alternates"))
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("remove alternates: %w", err)
+			}
 		}
 	}
 	err = os.Rename(tempRepo, localRepo)
