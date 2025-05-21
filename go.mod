@@ -1,4 +1,4 @@
-module gitcache
+module github.com/myml/gitcache
 
 go 1.22.1
 
