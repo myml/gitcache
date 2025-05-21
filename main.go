@@ -67,7 +67,6 @@ func copySymlink(src, dest string) error {
 		return fmt.Errorf("read dir(%s): %w", src, err)
 	}
 	for i := range files {
-		log.Println(files[i])
 		fname := files[i].Name()
 		err = os.Link(filepath.Join(src, fname), filepath.Join(dest, fname))
 		if err != nil {

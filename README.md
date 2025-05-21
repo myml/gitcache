@@ -17,7 +17,7 @@ gitcache
 
 通过 docker
 
-docker run -p 8080:8080 -v gitcache:/data ghcr.io/myml/gitcache:latest
+docker run -p 8080:8080 -e STORE_PATH=/data -v gitcache:/data ghcr.io/myml/gitcache:latest
 
 ## 使用
 
