@@ -162,9 +162,8 @@ func cacheRelease() gin.HandlerFunc {
 		cachekey := fmt.Sprintf("%s-%s", resp.Header.Get(url), changeid)
 		data := sha256.Sum256([]byte(cachekey))
 		cacheStoreKey := hex.EncodeToString(data[:])
-		cacheFilePath := path.Join(StorePath, "release", cacheStoreKey)
-		ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", path.Base(cacheFilePath)))
-		memCache.Store(url, cacheFilePath)
+		cacheFilePath := path.Join(StorePath, "releases", cacheStoreKey)
+		ctx.Header("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 		if _, err := os.Stat(cacheFilePath); err == nil {
 			log.Printf("Serving cached file %s", cacheFilePath)
 			ctx.File(cacheFilePath)
@@ -174,7 +173,7 @@ func cacheRelease() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache directory"})
 			return
 		}
-		out, err := os.Create(cacheFilePath)
+		out, err := os.Create(cacheFilePath + ".tmp")
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache file"})
 			return
@@ -189,6 +188,12 @@ func cacheRelease() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write URL to cache file"})
 			return
 		}
+		err = os.Rename(cacheFilePath+".tmp", cacheFilePath)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rename cache file"})
+			return
+		}
+		memCache.Store(url, cacheFilePath)
 		log.Printf("Cached %s to %s", url, cacheFilePath)
 	}
 }
