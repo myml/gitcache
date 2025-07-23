@@ -155,6 +155,10 @@ func cacheRelease() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			ctx.Status(resp.StatusCode)
+			return
+		}
 		changeid := resp.Header.Get("ETag")
 		if len(changeid) == 0 {
 			changeid = resp.Header.Get("Last-Modified")
@@ -179,6 +183,7 @@ func cacheRelease() gin.HandlerFunc {
 			return
 		}
 		defer out.Close()
+		log.Println("Downloading", url)
 		if _, err := out.ReadFrom(io.TeeReader(resp.Body, ctx.Writer)); err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write to cache file"})
 			return
