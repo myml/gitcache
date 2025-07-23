@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -139,6 +142,57 @@ func clone(remote, owner, repo string) error {
 	return nil
 }
 
+func cacheRelease() gin.HandlerFunc {
+	var memCache sync.Map
+	return func(ctx *gin.Context) {
+		url := ctx.Param("download_url")[1:]
+		if cacheFilePath, ok := memCache.Load(url); ok {
+			log.Printf("Serving cached file %s", cacheFilePath)
+			ctx.File(cacheFilePath.(string))
+		}
+		resp, err := http.Get(url)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		defer resp.Body.Close()
+		changeid := resp.Header.Get("ETag")
+		if len(changeid) == 0 {
+			changeid = resp.Header.Get("Last-Modified")
+		}
+		cachekey := fmt.Sprintf("%s-%s", resp.Header.Get(url), changeid)
+		data := sha256.Sum256([]byte(cachekey))
+		cacheStoreKey := hex.EncodeToString(data[:])
+		cacheFilePath := path.Join(StorePath, "release", cacheStoreKey)
+		ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", path.Base(cacheFilePath)))
+		memCache.Store(url, cacheFilePath)
+		if _, err := os.Stat(cacheFilePath); err == nil {
+			log.Printf("Serving cached file %s", cacheFilePath)
+			ctx.File(cacheFilePath)
+			return
+		}
+		if err := os.MkdirAll(path.Dir(cacheFilePath), 0755); err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache directory"})
+			return
+		}
+		out, err := os.Create(cacheFilePath)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache file"})
+			return
+		}
+		defer out.Close()
+		if _, err := out.ReadFrom(io.TeeReader(resp.Body, ctx.Writer)); err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write to cache file"})
+			return
+		}
+		err = os.WriteFile(cacheFilePath+".url", []byte(url+"\n"+cacheStoreKey), 0644)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write URL to cache file"})
+			return
+		}
+		log.Printf("Cached %s to %s", url, cacheFilePath)
+	}
+}
+
 func main() {
 	if path := os.Getenv("STORE_PATH"); len(path) > 0 {
 		StorePath = path
@@ -148,6 +202,7 @@ func main() {
 	}
 	var lock sync.Mutex
 	m := gin.Default()
+	m.GET("releases/*download_url", cacheRelease())
 	m.GET(":remote/:owner/:repo/*file", func(ctx *gin.Context) {
 		if ctx.Param("file") == "/info/refs" {
 			lock.Lock()
