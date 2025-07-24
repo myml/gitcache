@@ -142,53 +142,122 @@ func clone(remote, owner, repo string) error {
 	return nil
 }
 
+func genCacheStoreKey(url string) (string, int64) {
+	resp, err := http.Head(url)
+	if err != nil {
+		log.Panic(err)
+	}
+	defer resp.Body.Close()
+	changeid := resp.Header.Get("ETag")
+	if len(changeid) == 0 {
+		changeid = resp.Header.Get("Last-Modified")
+	}
+	cachekey := fmt.Sprintf("%s-%s-%d", resp.Header.Get(url), changeid, resp.ContentLength)
+	data := sha256.Sum256([]byte(cachekey))
+	cacheStoreKey := hex.EncodeToString(data[:])
+	return cacheStoreKey, resp.ContentLength
+}
+
 func cacheRelease() gin.HandlerFunc {
 	var memCache sync.Map
 	return func(ctx *gin.Context) {
 		url := ctx.Param("download_url")[1:]
+		// 检查内存缓存
 		if cacheFilePath, ok := memCache.Load(url); ok {
 			log.Printf("Serving cached file %s", cacheFilePath)
 			ctx.File(cacheFilePath.(string))
 		}
-		resp, err := http.Get(url)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			ctx.Status(resp.StatusCode)
-			return
-		}
-		changeid := resp.Header.Get("ETag")
-		if len(changeid) == 0 {
-			changeid = resp.Header.Get("Last-Modified")
-		}
-		cachekey := fmt.Sprintf("%s-%s", resp.Header.Get(url), changeid)
-		data := sha256.Sum256([]byte(cachekey))
-		cacheStoreKey := hex.EncodeToString(data[:])
+		// 检查磁盘缓存
+		cacheStoreKey, contentLength := genCacheStoreKey(url)
+		ctx.Header("Content-Length", fmt.Sprintf("%d", contentLength))
 		cacheFilePath := path.Join(StorePath, "releases", cacheStoreKey)
-		ctx.Header("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 		if _, err := os.Stat(cacheFilePath); err == nil {
+			memCache.Store(url, cacheFilePath)
 			log.Printf("Serving cached file %s", cacheFilePath)
 			ctx.File(cacheFilePath)
 			return
 		}
-		if err := os.MkdirAll(path.Dir(cacheFilePath), 0755); err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache directory"})
-			return
+		var out *os.File
+		var resp *http.Response
+		if stat, err := os.Stat(cacheFilePath + ".tmp"); err == nil {
+			// 如果缓存文件大小与文件大小相同，则移动缓存文件
+			if stat.Size() == contentLength {
+				err = os.Rename(cacheFilePath+".tmp", cacheFilePath)
+				if err != nil {
+					ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rename cache file"})
+					return
+				}
+				memCache.Store(url, cacheFilePath)
+				log.Printf("Serving cached file %s", cacheFilePath)
+				ctx.File(cacheFilePath)
+				return
+			}
+			// 断点续传
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+				return
+			}
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", stat.Size()))
+			resp, err = http.DefaultClient.Do(req)
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusPartialContent {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
+				return
+			}
+			{
+				// 将缓存文件中的内容发送到客户端
+				f, err := os.OpenFile(cacheFilePath+".tmp", os.O_RDONLY, 0644)
+				if err != nil {
+					ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open cache file"})
+					return
+				}
+				defer f.Close()
+				if _, err := io.Copy(ctx.Writer, f); err != nil {
+					ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to copy cache file"})
+					return
+				}
+				f.Close()
+			}
+			out, err = os.OpenFile(cacheFilePath+".tmp", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache file"})
+				return
+			}
+			defer out.Close()
+		} else {
+			// 新下载
+			resp, err = http.Get(url)
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
+				return
+			}
+			if err := os.MkdirAll(path.Dir(cacheFilePath), 0755); err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache directory"})
+				return
+			}
+			out, err = os.Create(cacheFilePath + ".tmp")
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache file"})
+				return
+			}
+			defer out.Close()
 		}
-		out, err := os.Create(cacheFilePath + ".tmp")
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cache file"})
-			return
-		}
-		defer out.Close()
 		log.Println("Downloading", url)
 		if _, err := out.ReadFrom(io.TeeReader(resp.Body, ctx.Writer)); err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write to cache file"})
 			return
 		}
-		err = os.WriteFile(cacheFilePath+".url", []byte(url+"\n"+cacheStoreKey), 0644)
+		err := os.WriteFile(cacheFilePath+".url", []byte(url+"\n"+cacheStoreKey), 0644)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write URL to cache file"})
 			return
