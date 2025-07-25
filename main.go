@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -99,12 +100,12 @@ func clone(remote, owner, repo string) error {
 	}
 	err = os.RemoveAll(tempRepo)
 	if err != nil {
-		return fmt.Errorf("Failed to remove temporary repository directory: %w", err)
+		return fmt.Errorf("failed to remove temporary repository directory: %w", err)
 	}
 	args := []string{"clone", "--bare", "--reference-if-able", referenceRepo, url, tempRepo}
 	err = execCmd(exec.Command("git", args...))
 	if err != nil {
-		return fmt.Errorf("Failed to clone repository: %w", err)
+		return fmt.Errorf("failed to clone repository: %w", err)
 	}
 	if existsRefRepo {
 		err = copySymlink(
@@ -119,12 +120,12 @@ func clone(remote, owner, repo string) error {
 	cmd.Dir = tempRepo
 	err = execCmd(cmd)
 	if err != nil {
-		return fmt.Errorf("Failed to update server info: %w", err)
+		return fmt.Errorf("failed to update server info: %w", err)
 	}
 	if existsLocalRepo {
 		err = os.RemoveAll(localRepo)
 		if err != nil {
-			return fmt.Errorf("Failed to remove local repository directory: %w", err)
+			return fmt.Errorf("failed to remove local repository directory: %w", err)
 		}
 	}
 	if existsRefRepo {
@@ -137,13 +138,13 @@ func clone(remote, owner, repo string) error {
 	}
 	err = os.Rename(tempRepo, localRepo)
 	if err != nil {
-		return fmt.Errorf("Failed to rename temporary repository directory: %w", err)
+		return fmt.Errorf("failed to rename temporary repository directory: %w", err)
 	}
 	return nil
 }
 
-func genCacheStoreKey(url string) (string, int64) {
-	resp, err := http.Head(url)
+func genCacheStoreKey(client *http.Client, url string) (string, int64) {
+	resp, err := client.Head(url)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -159,6 +160,17 @@ func genCacheStoreKey(url string) (string, int64) {
 }
 
 func cacheRelease() gin.HandlerFunc {
+	client := &http.Client{}
+	if proxyUrl := os.Getenv("HTTP_PROXY"); len(proxyUrl) > 0 {
+		proxyUrl, err := url.Parse(proxyUrl)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("proxyUrl", proxyUrl)
+		client.Transport = &http.Transport{
+			Proxy: http.ProxyURL(proxyUrl),
+		}
+	}
 	var memCache sync.Map
 	return func(ctx *gin.Context) {
 		url := ctx.Param("download_url")[1:]
@@ -168,7 +180,7 @@ func cacheRelease() gin.HandlerFunc {
 			ctx.File(cacheFilePath.(string))
 		}
 		// 检查磁盘缓存
-		cacheStoreKey, contentLength := genCacheStoreKey(url)
+		cacheStoreKey, contentLength := genCacheStoreKey(client, url)
 		ctx.Header("Content-Length", fmt.Sprintf("%d", contentLength))
 		cacheFilePath := path.Join(StorePath, "releases", cacheStoreKey)
 		if _, err := os.Stat(cacheFilePath); err == nil {
@@ -199,7 +211,7 @@ func cacheRelease() gin.HandlerFunc {
 				return
 			}
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", stat.Size()))
-			resp, err = http.DefaultClient.Do(req)
+			resp, err = client.Do(req)
 			if err != nil {
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
 				return
@@ -231,7 +243,7 @@ func cacheRelease() gin.HandlerFunc {
 			defer out.Close()
 		} else {
 			// 新下载
-			resp, err = http.Get(url)
+			resp, err = client.Get(url)
 			if err != nil {
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
 				return
