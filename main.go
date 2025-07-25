@@ -143,7 +143,7 @@ func clone(remote, owner, repo string) error {
 	return nil
 }
 
-func genCacheStoreKey(client *http.Client, url string) (string, int64) {
+func genCacheStoreKey(client *http.Client, url string) (key string, contentLength int64, supportRange bool) {
 	resp, err := client.Head(url)
 	if err != nil {
 		log.Panic(err)
@@ -156,7 +156,7 @@ func genCacheStoreKey(client *http.Client, url string) (string, int64) {
 	cachekey := fmt.Sprintf("%s-%s-%d", resp.Header.Get(url), changeid, resp.ContentLength)
 	data := sha256.Sum256([]byte(cachekey))
 	cacheStoreKey := hex.EncodeToString(data[:])
-	return cacheStoreKey, resp.ContentLength
+	return cacheStoreKey, resp.ContentLength, resp.Header.Get("Accept-Ranges") == "bytes"
 }
 
 func cacheRelease() gin.HandlerFunc {
@@ -172,15 +172,25 @@ func cacheRelease() gin.HandlerFunc {
 		}
 	}
 	var memCache sync.Map
+	var downloading sync.Map
+
 	return func(ctx *gin.Context) {
+		if len(ctx.Param("download_url")) == 0 {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "download_url is required"})
+			return
+		}
 		url := ctx.Param("download_url")[1:]
 		// 检查内存缓存
-		if cacheFilePath, ok := memCache.Load(url); ok {
-			log.Printf("Serving cached file %s", cacheFilePath)
-			ctx.File(cacheFilePath.(string))
+		if v, ok := memCache.Load(url); ok {
+			log.Printf("Serving cached file %s", v)
+			cacheFilePath := v.(string)
+			if _, err := os.Stat(cacheFilePath); err == nil {
+				ctx.File(cacheFilePath)
+				return
+			}
 		}
 		// 检查磁盘缓存
-		cacheStoreKey, contentLength := genCacheStoreKey(client, url)
+		cacheStoreKey, contentLength, supportRange := genCacheStoreKey(client, url)
 		ctx.Header("Content-Length", fmt.Sprintf("%d", contentLength))
 		cacheFilePath := path.Join(StorePath, "releases", cacheStoreKey)
 		if _, err := os.Stat(cacheFilePath); err == nil {
@@ -189,9 +199,17 @@ func cacheRelease() gin.HandlerFunc {
 			ctx.File(cacheFilePath)
 			return
 		}
+		// 检查是否正在下载，如果正在下载，则返回429
+		if _, ok := downloading.Load(url); ok {
+			ctx.JSON(http.StatusTooManyRequests, gin.H{"error": "url is downloading"})
+			return
+		}
+		downloading.Store(url, true)
+		defer downloading.Delete(url)
+		// 下载文件
 		var out *os.File
 		var resp *http.Response
-		if stat, err := os.Stat(cacheFilePath + ".tmp"); err == nil {
+		if stat, err := os.Stat(cacheFilePath + ".tmp"); err == nil && supportRange {
 			// 如果缓存文件大小与文件大小相同，则移动缓存文件
 			if stat.Size() == contentLength {
 				err = os.Rename(cacheFilePath+".tmp", cacheFilePath)
