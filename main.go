@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/cgi"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 )
 
 var StorePath = "data"
@@ -32,21 +35,48 @@ func main() {
 	if addr := os.Getenv("LISTEN_ADDR"); len(addr) > 0 {
 		ListenAddr = addr
 	}
-	var lock sync.Mutex
 	m := gin.Default()
 	m.GET("releases/*download_url", cacheRelease())
-	m.GET(":remote/:owner/:repo/*file", func(ctx *gin.Context) {
-		if ctx.Param("file") == "/info/refs" {
-			lock.Lock()
-			defer lock.Unlock()
-			err := clone(ctx.Param("remote"), ctx.Param("owner"), ctx.Param("repo"))
+	var group singleflight.Group
+	m.Any(":remote/:owner/:repo/*action", func(ctx *gin.Context) {
+		repoPath := filepath.Join(StorePath, ctx.Param("remote"), ctx.Param("owner"), ctx.Param("repo"))
+		repoPath, err := filepath.Abs(repoPath)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if ctx.Request.Method == http.MethodGet && ctx.Param("action") == "/info/refs" {
+			_, err, _ := group.Do(repoPath, func() (interface{}, error) {
+				for i := 0; i < 3; i++ {
+					err := clone(ctx.Param("remote"), ctx.Param("owner"), ctx.Param("repo"))
+					if err == nil {
+						return nil, nil
+					}
+					log.Println("clone repo error: ", err)
+					time.Sleep(time.Second)
+				}
+				return nil, fmt.Errorf("clone repo failed")
+			})
 			if err != nil {
 				log.Println("Error cloning repository: ", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 		}
-		http.FileServer(http.Dir(StorePath)).ServeHTTP(ctx.Writer, ctx.Request)
+
+		handler := &cgi.Handler{
+			Path: "git",
+			Args: []string{"http-backend"},
+			Env: []string{
+				"GIT_PROJECT_ROOT=" + repoPath,
+				"GIT_HTTP_EXPORT_ALL=",
+				"REQUEST_METHOD=" + ctx.Request.Method,
+				"PATH_INFO=" + ctx.Param("action"),
+				"QUERY_STRING=" + ctx.Request.URL.RawQuery,
+				"CONTENT_TYPE=" + ctx.GetHeader("Content-Type"),
+			},
+		}
+		handler.ServeHTTP(ctx.Writer, ctx.Request)
 	})
 	err := m.Run(ListenAddr)
 	if err != nil {
