@@ -65,7 +65,7 @@ func main() {
 		}
 
 		handler := &cgi.Handler{
-			Path: "git",
+			Path: "/usr/bin/git",
 			Args: []string{"http-backend"},
 			Env: []string{
 				"GIT_PROJECT_ROOT=" + repoPath,
